@@ -1,102 +1,93 @@
 const fs = require('fs');
 const axios = require('axios');
 const cron = require('node-cron');
+const path = require('path');
+
+const LOG_FILE = path.join(__dirname, 'checkin.log');
+
+// Function to log messages
+target}
+function logMessage(message) {
+    const timestamp = new Date().toISOString();
+    const logEntry = `[${timestamp}] ${message}\n`;
+    fs.appendFileSync(LOG_FILE, logEntry);
+    console.log(logEntry.trim());
+}
 
 // Function to read tokens from file
 function readTokens() {
     try {
         const content = fs.readFileSync('tokens.txt', 'utf8');
-        // Split by new line and remove empty lines
         const tokens = content.split('\n').filter(token => token.trim() !== '');
-        if (tokens.length === 0) {
-            throw new Error('No tokens found in tokens.txt');
-        }
+        if (tokens.length === 0) throw new Error('No tokens found in tokens.txt');
         return tokens;
     } catch (error) {
-        console.error('Error reading tokens file:', error);
+        logMessage(`Error reading tokens file: ${error.message}`);
         process.exit(1);
     }
 }
 
-// Function to perform check-in for a single account
+// Function to perform check-in with retry mechanism
 async function performCheckIn(token, accountIndex) {
-    try {
-        const response = await axios({
-            method: 'POST',
-            url: 'https://api.earnos.com/trpc/streak.checkIn?batch=1',
-            headers: {
-                'authority': 'api.earnos.com',
-                'accept': '*/*',
-                'accept-language': 'en-US,en;q=0.7',
-                'authorization': `Bearer ${token.trim()}`,
-                'content-type': 'application/json',
-                'origin': 'https://app.earnos.com',
-                'referer': 'https://app.earnos.com/',
-                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
-            },
-            data: {
-                "0": {
-                    "json": null,
-                    "meta": {
-                        "values": ["undefined"]
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            const response = await axios.post(
+                'https://api.earnos.com/trpc/streak.checkIn?batch=1',
+                { "0": { "json": null, "meta": { "values": ["undefined"] } } },
+                {
+                    headers: {
+                        'authorization': `Bearer ${token.trim()}`,
+                        'content-type': 'application/json',
+                        'user-agent': 'Mozilla/5.0'
                     }
                 }
-            }
-        });
+            );
 
-        if (response.data[0]?.result?.data?.json?.success) {
-            console.log(`Account ${accountIndex + 1}: Check-in successful!`, new Date().toISOString());
-            return true;
-        } else {
-            console.log(`Account ${accountIndex + 1}: Check-in failed:`, response.data);
-            return false;
+            if (response.data[0]?.result?.data?.json?.success) {
+                logMessage(`Account ${accountIndex + 1}: Check-in successful!`);
+                return true;
+            } else {
+                logMessage(`Account ${accountIndex + 1}: Check-in failed (Attempt ${attempt})`);
+            }
+        } catch (error) {
+            logMessage(`Account ${accountIndex + 1}: Error (Attempt ${attempt}): ${error.message}`);
         }
-    } catch (error) {
-        console.error(`Account ${accountIndex + 1}: Error performing check-in:`, error.response?.data || error.message);
-        return false;
+        await new Promise(resolve => setTimeout(resolve, 5000)); // Delay between retries
     }
+    return false;
 }
 
 // Function to perform check-in for all accounts
 async function performAllCheckIns(tokens) {
-    const results = [];
+    let successCount = 0;
     for (let i = 0; i < tokens.length; i++) {
-        console.log(`\nProcessing Account ${i + 1}...`);
-        const result = await performCheckIn(tokens[i], i);
-        results.push(result);
-        
-        // Add a small delay between requests to avoid rate limiting
-        if (i < tokens.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
-        }
+        logMessage(`Processing Account ${i + 1}...`);
+        const success = await performCheckIn(tokens[i], i);
+        if (success) successCount++;
+        await new Promise(resolve => setTimeout(resolve, 2000));
     }
-    
-    // Log summary
-    const successful = results.filter(r => r).length;
-    console.log(`\nCheck-in Summary: ${successful}/${tokens.length} accounts successful`);
+    logMessage(`Check-in Summary: ${successCount}/${tokens.length} accounts successful`);
 }
 
 // Main function
 async function main() {
     const tokens = readTokens();
-    console.log(`Loaded ${tokens.length} accounts`);
+    logMessage(`Loaded ${tokens.length} accounts`);
     
-    // Schedule daily check-in at 00:01 (just after midnight)
     cron.schedule('1 0 * * *', async () => {
-        console.log('\nPerforming scheduled check-ins...');
+        logMessage('Starting scheduled check-ins...');
         await performAllCheckIns(tokens);
     });
-
-    // Perform initial check-in when starting the bot
-    console.log('\nPerforming initial check-ins...');
+    
+    logMessage('Performing initial check-ins...');
     await performAllCheckIns(tokens);
 }
 
 // Start the bot
-main().catch(console.error);
+main().catch(error => logMessage(`Fatal Error: ${error.message}`));
 
 // Handle process termination
 process.on('SIGINT', () => {
-    console.log('\nBot shutting down...');
+    logMessage('Bot shutting down...');
     process.exit(0);
 });
